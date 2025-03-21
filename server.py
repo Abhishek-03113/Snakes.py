@@ -60,106 +60,67 @@ class GameServer:
         print(f"New connection from {addr}")
 
         try:
-            print(f"Waiting for name from {addr}")
-            name_data = conn.recv(1024).decode("utf-8")
+            conn.settimeout(5)  # Prevent infinite waiting
+            name_data = conn.recv(1024).decode('utf-8')
             if not name_data:
-                print(f"No name received from {addr}")
-                conn.close()
+                print(f"No name received from {addr}, closing connection.")
                 return
 
             name = name_data.strip()
             print(f"Name received from {addr}: {name}")
 
-            if not name or len(name) == 0:
-                print(f"Invalid name from {addr}")
-                conn.close()
-                return
-
-            # Initialize player
+            # Initialize player (ensure no duplicate threads)
             with self.lock:
-                while True:
-                    x = random.randint(5, WIDTH - 5)
-                    y = random.randint(5, HEIGHT - 5)
-                    collision = False
-
-                    for player in self.players.values():
-                        if (x, y) in player["body"]:
-                            collision = True
-                            break
-
-                    if not collision:
-                        break
-
-                direction = random.randint(0, 3)
                 self.players[conn] = {
-                    "name": name,
-                    "body": [(x, y)],
-                    "direction": direction,
-                    "score": 0,
-                    "alive": True,
+                    'name': name,
+                    'body': [(random.randint(5, WIDTH - 5), random.randint(5, HEIGHT - 5))],
+                    'direction': random.randint(0, 3),
+                    'score': 0,
+                    'alive': True
                 }
 
-            print(f"Player initialized: {name} from {addr}")
-
-            # **DEBUG CHECKPOINT**
-            print(f"About to send game state to {name}...")
+            print(f"Player {name} initialized, sending game state.")
             self.send_game_state(conn)
-            print(f"Game state sent successfully to {name}")
 
             while True:
                 try:
-                    data = conn.recv(1024).decode("utf-8")
+                    data = conn.recv(1024).decode('utf-8')
                     if not data:
                         print(f"Connection closed for {name}")
                         break
+                    
                     print(f"Received input from {name}: {data}")
+                    with self.lock:
+                        if conn in self.players and self.players[conn]['alive']:
+                            self.process_player_input(conn, data)
+                except socket.timeout:
+                    print(f"{name} connection timed out.")
+                    break
                 except Exception as e:
                     print(f"Error handling input from {name}: {e}")
                     break
+
         finally:
             with self.lock:
                 if conn in self.players:
-                    print(f"Player disconnected: {self.players[conn]['name']}")
+                    print(f"Removing player {self.players[conn]['name']}")
                     del self.players[conn]
             conn.close()
+        
 
     def send_game_state(self, conn=None):
-        with self.lock:
-            game_state = {
-                "width": WIDTH,
-                "height": HEIGHT,
-                "players": [],
-                "foods": self.foods,
-            }
-
-            for player_conn, player_data in self.players.items():
-                game_state["players"].append(
-                    {
-                        "name": player_data["name"],
-                        "body": player_data["body"],
-                        "score": player_data["score"],
-                        "alive": player_data["alive"],
-                    }
-                )
-
-            state_json = json.dumps(game_state)
+        try:
+            with self.lock:
+                game_state = json.dumps(self.get_game_state())
 
             if conn:
-                try:
-                    conn.sendall(state_json.encode("utf-8"))  # Use sendall()
-                    print(f"Sent game state to {self.players[conn]['name']}")
-                except Exception as e:
-                    print(f"Error sending game state to specific client: {e}")
+                conn.sendall(game_state.encode('utf-8'))
             else:
                 for player_conn in list(self.players.keys()):
-                    try:
-                        player_conn.sendall(state_json.encode("utf-8"))  # Use sendall()
-                    except Exception as e:
-                        print(
-                            f"Error sending game state to {self.players[player_conn]['name']}: {e}"
-                        )
-                        continue
-                print("Game state broadcasted to all players")
+                    player_conn.sendall(game_state.encode('utf-8'))
+        except Exception as e:
+            print(f"Error sending game state: {e}")
+
 
     def move_snakes(self):
         with self.lock:
@@ -251,6 +212,7 @@ class GameServer:
                 time.sleep(TICK_RATE)
             except Exception as e:
                 print(f"Error in game loop: {e}")
+                break
 
     def start(self):
         try:
@@ -274,3 +236,4 @@ class GameServer:
 if __name__ == "__main__":
     server = GameServer()
     server.start()
+

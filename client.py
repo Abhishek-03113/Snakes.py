@@ -8,7 +8,7 @@ import sys
 
 
 class GameClient:
-    def __init__(self, host="localhost", port=5555):
+    def __init__(self, host="0.0.0.0", port=5555):
         self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.host = host
         self.port = port
@@ -28,30 +28,84 @@ class GameClient:
     def send_name(self, name):
         self.player_name = name
         self.client.send(name.encode("utf-8"))
+        # Wait for the initial game state
+        self.receive_game_state_once()
+
+    def receive_game_state_once(self):
+        try:
+            header = self.client.recv(4)
+            if not header:
+                print("Server closed the connection.")
+                self.running = False
+                return
+
+            length = int.from_bytes(header, byteorder="big")
+            print(f"Received header. Expecting {length} bytes of data.")
+
+            data = b""
+            while len(data) < length:
+                packet = self.client.recv(length - len(data))
+                if not packet:
+                    raise ConnectionError("Incomplete data received.")
+                data += packet
+
+            print(f"Received {len(data)} bytes of data.")
+            print(f"Raw JSON data: {data.decode('utf-8')}")
+
+            with self.lock:
+                self.game_state = json.loads(data.decode("utf-8"))
+                print("Game state updated successfully.")
+
+        except (ConnectionResetError, ConnectionError) as e:
+            print(f"Connection error: {e}")
+            self.running = False
+        except json.JSONDecodeError:
+            print("Received malformed JSON data. Ignoring...")
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            self.running = False
 
     def receive_game_state(self):
         while self.running:
             try:
-                data = self.client.recv(4096).decode("utf-8")
-                if not data:
+                # Read the 4-byte header to get the message length
+                header = self.client.recv(4)
+                if not header:
                     print("Server closed the connection.")
                     self.running = False
                     break
 
-                with self.lock:
-                    self.game_state = json.loads(data)
+                length = int.from_bytes(header, byteorder="big")
+                print(f"Received header. Expecting {length} bytes of data.")
 
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                print("Received malformed data. Ignoring...")
-            except ConnectionResetError:
-                print("Connection reset by server.")
+                # Now read the exact number of bytes specified by the header
+                data = b""
+                while len(data) < length:
+                    packet = self.client.recv(length - len(data))
+                    if not packet:
+                        raise ConnectionError("Incomplete data received.")
+                    data += packet
+
+                print(f"Received {len(data)} bytes of data.")
+                print(
+                    f"Raw JSON data: {data.decode('utf-8')}"
+                )  # Debugging: Print raw JSON
+
+                with self.lock:
+                    self.game_state = json.loads(data.decode("utf-8"))
+                    print("Game state updated successfully.")
+
+            except (ConnectionResetError, ConnectionError) as e:
+                print(f"Connection error: {e}")
                 self.running = False
                 break
+            except json.JSONDecodeError:
+                print("Received malformed JSON data. Ignoring...")
             except Exception as e:
                 print(f"Unexpected error: {e}")
                 self.running = False
                 break
-        self.close()  # Ensure socket is closed when exiting
+        self.close()
 
     def send_input(self, direction):
         try:
@@ -71,7 +125,7 @@ class GameClient:
 
     def display_game(self):
         os.system("cls" if os.name == "nt" else "clear")
-
+        # self.game_state = self.receive_game_state()
         if not self.game_state:
             print("Waiting for game state...")
             return
