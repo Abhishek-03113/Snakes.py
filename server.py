@@ -6,8 +6,8 @@ import time
 import json
 
 # Game settings
-WIDTH = 60
-HEIGHT = 20
+WIDTH = 100
+HEIGHT = 40
 MAX_FOODS = 5
 TICK_RATE = 0.1  # seconds between game updates
 
