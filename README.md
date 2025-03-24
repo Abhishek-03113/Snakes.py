@@ -31,7 +31,7 @@ You need to have Python installed on your machine. You can download it from [pyt
 1. Clone the repository:
 
    ```
-   git clone https://github.com/yourusername/snakes.git
+   git clone https://github.com/abhishek-03113/snakes.git
    cd snakes
    ```
 
