@@ -1,4 +1,4 @@
-# server_debug.py
+# server.py
 import socket
 import threading
 import random
@@ -16,17 +16,11 @@ class GameServer:
     def __init__(self, host="0.0.0.0", port=5555):
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            self.server.bind((host, port))
-        except socket.error as e:
-            print(f"Socket binding error: {e}")
-            exit()
-
-        self.server.listen(5)
+        self.server.bind((host, port))
+        self.server.listen()
 
         self.players = {}  # {conn: player_data}
         self.foods = []
-        self.lock = threading.Lock()
 
         print(f"Server started on {host}:{port}")
 
@@ -34,206 +28,218 @@ class GameServer:
         self.generate_foods()
 
         # Start game loop
-        self.game_thread = threading.Thread(target=self.game_loop, daemon=True)
-        self.game_thread.start()
-        print("Game loop started")
+        threading.Thread(target=self.game_loop, daemon=True).start()
 
     def generate_foods(self):
-        with self.lock:
-            while len(self.foods) < MAX_FOODS:
-                x = random.randint(1, WIDTH - 2)
-                y = random.randint(1, HEIGHT - 2)
+        while len(self.foods) < MAX_FOODS:
+            x = random.randint(1, WIDTH - 2)
+            y = random.randint(1, HEIGHT - 2)
 
-                # Check if position is already occupied
-                if (x, y) not in [food["pos"] for food in self.foods]:
-                    self.foods.append(
-                        {
-                            "pos": (x, y),
-                            "value": random.randint(
-                                1, 3
-                            ),  # Food value (length added when eaten)
-                        }
-                    )
-            print(f"Foods generated: {len(self.foods)}")
+            # Check if position is already occupied
+            if (x, y) not in [food["pos"] for food in self.foods]:
+                self.foods.append(
+                    {
+                        "pos": (x, y),
+                        "value": random.randint(
+                            1, 3
+                        ),  # Food value (length added when eaten)
+                    }
+                )
 
     def handle_client(self, conn, addr):
-        print(f"New connection from {addr}")
-
         try:
-            conn.settimeout(5)  # Prevent infinite waiting
-            name_data = conn.recv(1024).decode('utf-8')
-            if not name_data:
-                print(f"No name received from {addr}, closing connection.")
+            # Get player name
+            name_data = conn.recv(1024).decode("utf-8")
+            name = name_data.strip()
+
+            if not name or len(name) == 0:
+                conn.close()
                 return
 
-            name = name_data.strip()
-            print(f"Name received from {addr}: {name}")
+            # Initialize player
+            # Find a free spot for the new snake
+            while True:
+                x = random.randint(5, WIDTH - 5)
+                y = random.randint(5, HEIGHT - 5)
+                collision = False
 
-            # Initialize player (ensure no duplicate threads)
-            with self.lock:
-                self.players[conn] = {
-                    'name': name,
-                    'body': [(random.randint(5, WIDTH - 5), random.randint(5, HEIGHT - 5))],
-                    'direction': random.randint(0, 3),
-                    'score': 0,
-                    'alive': True
-                }
+                for player in self.players.values():
+                    if (x, y) in player["body"]:
+                        collision = True
+                        break
 
-            print(f"Player {name} initialized, sending game state.")
+                if not collision:
+                    break
+
+            # Initial direction (0: right, 1: down, 2: left, 3: up)
+            direction = random.randint(0, 3)
+
+            self.players[conn] = {
+                "name": name,
+                "body": [(x, y)],  # Head is at index 0
+                "direction": direction,
+                "score": 0,
+                "alive": True,
+            }
+
+            print(f"New player connected: {name} from {addr}")
+
+            # Send initial game state
             self.send_game_state(conn)
 
+            # Handle player input
             while True:
                 try:
-                    data = conn.recv(1024).decode('utf-8')
+                    data = conn.recv(1024).decode("utf-8")
                     if not data:
-                        print(f"Connection closed for {name}")
                         break
-                    
-                    print(f"Received input from {name}: {data}")
-                    with self.lock:
-                        if conn in self.players and self.players[conn]['alive']:
-                            self.process_player_input(conn, data)
-                except socket.timeout:
-                    print(f"{name} connection timed out.")
-                    break
-                except Exception as e:
-                    print(f"Error handling input from {name}: {e}")
+
+                    player = self.players.get(conn)
+                    if player and player["alive"]:
+                        current_dir = player["direction"]
+
+                        if data == "w" and current_dir != 1:  # Up
+                            player["direction"] = 3
+                        elif data == "s" and current_dir != 3:  # Down
+                            player["direction"] = 1
+                        elif data == "a" and current_dir != 0:  # Left
+                            player["direction"] = 2
+                        elif data == "d" and current_dir != 2:  # Right
+                            player["direction"] = 0
+
+                except:
                     break
 
         finally:
-            with self.lock:
-                if conn in self.players:
-                    print(f"Removing player {self.players[conn]['name']}")
-                    del self.players[conn]
+            if conn in self.players:
+                print(f"Player disconnected: {self.players[conn]['name']}")
+                del self.players[conn]
+
             conn.close()
-        
 
     def send_game_state(self, conn=None):
-        try:
-            with self.lock:
-                game_state = json.dumps(self.get_game_state())
+        game_state = {
+            "width": WIDTH,
+            "height": HEIGHT,
+            "players": [],
+            "foods": self.foods,
+        }
 
-            if conn:
-                conn.sendall(game_state.encode('utf-8'))
-            else:
-                for player_conn in list(self.players.keys()):
-                    player_conn.sendall(game_state.encode('utf-8'))
-        except Exception as e:
-            print(f"Error sending game state: {e}")
+        for player_conn, player_data in self.players.items():
+            game_state["players"].append(
+                {
+                    "name": player_data["name"],
+                    "body": player_data["body"],
+                    "score": player_data["score"],
+                    "alive": player_data["alive"],
+                }
+            )
 
+        state_json = json.dumps(game_state)
+
+        if conn:  # Send to specific client
+            try:
+                conn.send(state_json.encode("utf-8"))
+            except:
+                pass
+        else:  # Send to all clients
+            for player_conn in list(self.players.keys()):
+                try:
+                    player_conn.send(state_json.encode("utf-8"))
+                except:
+                    continue
 
     def move_snakes(self):
-        with self.lock:
-            for conn, player in list(self.players.items()):
-                if not player["alive"]:
-                    continue
+        for conn, player in list(self.players.items()):
+            if not player["alive"]:
+                continue
 
-                head = player["body"][0]
-                direction = player["direction"]
+            head = player["body"][0]
+            direction = player["direction"]
 
-                # Calculate new head position
-                if direction == 0:  # Right
-                    new_head = (head[0] + 1, head[1])
-                elif direction == 1:  # Down
-                    new_head = (head[0], head[1] + 1)
-                elif direction == 2:  # Left
-                    new_head = (head[0] - 1, head[1])
-                elif direction == 3:  # Up
-                    new_head = (head[0], head[1] - 1)
+            # Calculate new head position
+            if direction == 0:  # Right
+                new_head = (head[0] + 1, head[1])
+            elif direction == 1:  # Down
+                new_head = (head[0], head[1] + 1)
+            elif direction == 2:  # Left
+                new_head = (head[0] - 1, head[1])
+            elif direction == 3:  # Up
+                new_head = (head[0], head[1] - 1)
 
-                # Check wall collision
-                if (
-                    new_head[0] <= 0
-                    or new_head[0] >= WIDTH - 1
-                    or new_head[1] <= 0
-                    or new_head[1] >= HEIGHT - 1
-                ):
-                    player["alive"] = False
-                    print(f"Player {player['name']} hit wall")
-                    continue
+            # Check wall collision
+            if (
+                new_head[0] <= 0
+                or new_head[0] >= WIDTH - 1
+                or new_head[1] <= 0
+                or new_head[1] >= HEIGHT - 1
+            ):
+                player["alive"] = False
+                continue
 
-                # Check collision with self
-                if new_head in player["body"]:
-                    player["alive"] = False
-                    print(f"Player {player['name']} hit self")
-                    continue
+            # Check collision with self
+            if new_head in player["body"]:
+                player["alive"] = False
+                continue
 
-                # Check collision with other snakes
-                collision = False
-                for other_conn, other_player in self.players.items():
-                    if conn != other_conn and other_player["alive"]:
-                        if new_head in other_player["body"]:
-                            # Compare lengths to determine which snake dies
-                            if len(player["body"]) <= len(other_player["body"]):
-                                player["alive"] = False
-                                other_player["score"] += len(player["body"])
-                                print(
-                                    f"Player {player['name']} hit larger snake {other_player['name']}"
-                                )
-                                collision = True
-                                break
-                            else:
-                                other_player["alive"] = False
-                                player["score"] += len(other_player["body"])
-                                print(
-                                    f"Player {player['name']} destroyed smaller snake {other_player['name']}"
-                                )
+            # Check collision with other snakes
+            collision = False
+            for other_conn, other_player in self.players.items():
+                if conn != other_conn and other_player["alive"]:
+                    if new_head in other_player["body"]:
+                        # Compare lengths to determine which snake dies
+                        if len(player["body"]) <= len(other_player["body"]):
+                            player["alive"] = False
+                            other_player["score"] += len(player["body"])
+                            collision = True
+                            break
+                        else:
+                            other_player["alive"] = False
+                            player["score"] += len(other_player["body"])
 
-                if collision:
-                    continue
+            if collision:
+                continue
 
-                # Move the snake (add new head)
-                player["body"].insert(0, new_head)
+            # Move the snake (add new head)
+            player["body"].insert(0, new_head)
 
-                # Check food collision
-                ate_food = False
-                for i, food in enumerate(self.foods):
-                    if new_head == food["pos"]:
-                        player["score"] += food["value"]
-                        # Don't remove tail when food is eaten
-                        ate_food = True
-                        del self.foods[i]
-                        print(f"Player {player['name']} ate food")
-                        break
+            # Check food collision
+            ate_food = False
+            for i, food in enumerate(self.foods):
+                if new_head == food["pos"]:
+                    player["score"] += food["value"]
+                    # Don't remove tail when food is eaten
+                    ate_food = True
+                    del self.foods[i]
+                    break
 
-                if not ate_food:
-                    # Remove tail if no food was eaten
-                    player["body"].pop()
+            if not ate_food:
+                # Remove tail if no food was eaten
+                player["body"].pop()
 
-            # Generate new food if needed
-            self.generate_foods()
+        # Generate new food if needed
+        self.generate_foods()
 
     def game_loop(self):
         while True:
-            try:
-                print("Game loop running...")
-                self.move_snakes()
-                self.send_game_state()
-                time.sleep(TICK_RATE)
-            except Exception as e:
-                print(f"Error in game loop: {e}")
-                break
+            self.move_snakes()
+            self.send_game_state()
+            time.sleep(TICK_RATE)
 
     def start(self):
         try:
             while True:
                 conn, addr = self.server.accept()
-                print(f"Connected with {addr}")
                 thread = threading.Thread(target=self.handle_client, args=(conn, addr))
                 thread.daemon = True
                 thread.start()
-                print(f"Active connections: {threading.active_count() - 1}")
         except KeyboardInterrupt:
             print("Server shutting down...")
-        except Exception as e:
-            print(f"Server error: {e}")
         finally:
             if self.server:
                 self.server.close()
-                print("Server socket closed")
 
 
 if __name__ == "__main__":
     server = GameServer()
     server.start()
-

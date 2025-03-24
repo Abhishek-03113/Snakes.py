@@ -1,21 +1,22 @@
-# client_basic.py
+# client.py
 import socket
 import threading
 import json
 import os
 import time
 import sys
+import curses
+from curses import wrapper
 
 
 class GameClient:
-    def __init__(self, host="0.0.0.0", port=5555):
+    def __init__(self, host="localhost", port=5555):
         self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.host = host
         self.port = port
         self.game_state = None
         self.player_name = ""
         self.running = True
-        self.lock = threading.Lock()
 
     def connect(self):
         try:
@@ -28,84 +29,20 @@ class GameClient:
     def send_name(self, name):
         self.player_name = name
         self.client.send(name.encode("utf-8"))
-        # Wait for the initial game state
-        self.receive_game_state_once()
-
-    def receive_game_state_once(self):
-        try:
-            header = self.client.recv(4)
-            if not header:
-                print("Server closed the connection.")
-                self.running = False
-                return
-
-            length = int.from_bytes(header, byteorder="big")
-            print(f"Received header. Expecting {length} bytes of data.")
-
-            data = b""
-            while len(data) < length:
-                packet = self.client.recv(length - len(data))
-                if not packet:
-                    raise ConnectionError("Incomplete data received.")
-                data += packet
-
-            print(f"Received {len(data)} bytes of data.")
-            print(f"Raw JSON data: {data.decode('utf-8')}")
-
-            with self.lock:
-                self.game_state = json.loads(data.decode("utf-8"))
-                print("Game state updated successfully.")
-
-        except (ConnectionResetError, ConnectionError) as e:
-            print(f"Connection error: {e}")
-            self.running = False
-        except json.JSONDecodeError:
-            print("Received malformed JSON data. Ignoring...")
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            self.running = False
 
     def receive_game_state(self):
         while self.running:
             try:
-                # Read the 4-byte header to get the message length
-                header = self.client.recv(4)
-                if not header:
-                    print("Server closed the connection.")
-                    self.running = False
+                data = self.client.recv(4096).decode("utf-8")
+                if not data:
                     break
 
-                length = int.from_bytes(header, byteorder="big")
-                print(f"Received header. Expecting {length} bytes of data.")
+                self.game_state = json.loads(data)
 
-                # Now read the exact number of bytes specified by the header
-                data = b""
-                while len(data) < length:
-                    packet = self.client.recv(length - len(data))
-                    if not packet:
-                        raise ConnectionError("Incomplete data received.")
-                    data += packet
-
-                print(f"Received {len(data)} bytes of data.")
-                print(
-                    f"Raw JSON data: {data.decode('utf-8')}"
-                )  # Debugging: Print raw JSON
-
-                with self.lock:
-                    self.game_state = json.loads(data.decode("utf-8"))
-                    print("Game state updated successfully.")
-
-            except (ConnectionResetError, ConnectionError) as e:
-                print(f"Connection error: {e}")
+            except:
+                print("Connection lost")
                 self.running = False
                 break
-            except json.JSONDecodeError:
-                print("Received malformed JSON data. Ignoring...")
-            except Exception as e:
-                print(f"Unexpected error: {e}")
-                self.running = False
-                break
-        self.close()
 
     def send_input(self, direction):
         try:
@@ -123,131 +60,128 @@ class GameClient:
 
         return None
 
-    def display_game(self):
-        os.system("cls" if os.name == "nt" else "clear")
-        # self.game_state = self.receive_game_state()
-        if not self.game_state:
-            print("Waiting for game state...")
-            return
+    def run_game(self, stdscr):
+        # Set up curses
+        curses.curs_set(0)  # Hide cursor
+        stdscr.clear()
 
-        required_keys = ["players", "width", "height", "foods"]
-        if not all(key in self.game_state for key in required_keys):
-            print("Invalid game state received.")
-            return
+        # Colors
+        curses.start_color()
+        curses.init_pair(1, curses.COLOR_GREEN, curses.COLOR_BLACK)  # Food
+        curses.init_pair(2, curses.COLOR_RED, curses.COLOR_BLACK)  # Other snakes
+        curses.init_pair(3, curses.COLOR_BLUE, curses.COLOR_BLACK)  # Player snake
+        curses.init_pair(4, curses.COLOR_YELLOW, curses.COLOR_BLACK)  # Border
+        curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_BLACK)  # Text
 
-        width = self.game_state["width"]
-        height = self.game_state["height"]
-
-        # Create empty board
-        board = [[" " for _ in range(width)] for _ in range(height)]
-
-        # Draw border
-        for i in range(width):
-            board[0][i] = "#"
-            board[height - 1][i] = "#"
-        for i in range(height):
-            board[i][0] = "#"
-            board[i][width - 1] = "#"
-
-        # Draw food
-        for food in self.game_state["foods"]:
-            x, y = food.get(
-                "pos", (-1, -1)
-            )  # Default to an invalid position if key is missing
-            if 0 <= x < width and 0 <= y < height:
-                board[y][x] = "*"
-
-        # Draw snakes
-        for player in self.game_state["players"]:
-            if (
-                not isinstance(player, dict)
-                or "alive" not in player
-                or "body" not in player
-            ):
-                continue  # Skip malformed player data
-
-            if player["alive"]:
-                for i, (x, y) in enumerate(player["body"]):
-                    if 0 <= x < width and 0 <= y < height:
-                        if i == 0:
-                            board[y][x] = player["name"][0].upper()
-                        else:
-                            board[y][x] = "o"
-
-        # Print the board
-        for row in board:
-            print("".join(row))
-
-        # Print scoreboard
-        print("\nSCOREBOARD")
-        print("-----------")
-
-        # Sort players by score
-        sorted_players = sorted(
-            self.game_state["players"], key=lambda p: p["score"], reverse=True
-        )
-
-        for player in sorted_players:
-            status = "ALIVE" if player["alive"] else "DEAD"
-            name_display = player["name"]
-            if player["name"] == self.player_name:
-                name_display = f"{name_display} (YOU)"
-
-            print(f"{name_display}: {player['score']} - {status}")
-
-        # Print instructions
-        print("\nControls:")
-        print("w: Up")
-        print("s: Down")
-        print("a: Left")
-        print("d: Right")
-        print("q: Quit")
-        print("\nEnter your move: ", end="", flush=True)
-
-    def run_game(self):
         # Start receiving game state in a separate thread
         receive_thread = threading.Thread(target=self.receive_game_state)
         receive_thread.daemon = True
         receive_thread.start()
 
-        # Let the server send initial game state
-        time.sleep(0.5)
-
-        # Display thread
-        def display_loop():
-            while self.running:
-                with self.lock:
-                    self.display_game()
-                time.sleep(0.2)
-
-        # Start display thread
-        display_thread = threading.Thread(target=display_loop)
-        display_thread.daemon = True
-        display_thread.start()
-
-        # Main input loop - simple blocking input
+        # Game loop
+        stdscr.nodelay(True)  # Non-blocking input
         while self.running:
             try:
-                key = input("\nEnter move (w/a/s/d/q): ").strip().lower()
+                # Handle input
+                key = stdscr.getch()
+                if key != -1:
+                    if key == ord("q"):
+                        self.running = False
+                        break
+                    elif key == ord("w") or key == curses.KEY_UP:
+                        self.send_input("w")
+                    elif key == ord("s") or key == curses.KEY_DOWN:
+                        self.send_input("s")
+                    elif key == ord("a") or key == curses.KEY_LEFT:
+                        self.send_input("a")
+                    elif key == ord("d") or key == curses.KEY_RIGHT:
+                        self.send_input("d")
 
-                if key == "q":
-                    print("Quitting the game...")
-                    self.running = False
-                    break
-                elif key in ["w", "a", "s", "d"]:
-                    self.send_input(key)
-                    with self.lock:
-                        self.display_game()
-                else:
-                    print(
-                        "Invalid input! Use 'w', 'a', 's', 'd' to move or 'q' to quit."
+                # Render game state
+                game_state = self.game_state
+                if not game_state:
+                    time.sleep(0.1)
+                    continue
+
+                stdscr.clear()
+
+                # Draw border
+                width = game_state["width"]
+                height = game_state["height"]
+                for i in range(width):
+                    stdscr.addch(0, i, "#", curses.color_pair(4))
+                    stdscr.addch(height - 1, i, "#", curses.color_pair(4))
+                for i in range(height):
+                    stdscr.addch(i, 0, "#", curses.color_pair(4))
+                    stdscr.addch(i, width - 1, "#", curses.color_pair(4))
+
+                # Draw food
+                for food in game_state["foods"]:
+                    x, y = food["pos"]
+                    stdscr.addch(y, x, "*", curses.color_pair(1))
+
+                # Draw snakes
+                player_self = self.find_player()
+                for player in game_state["players"]:
+                    if player["alive"]:
+                        is_self = player["name"] == self.player_name
+                        color = (
+                            curses.color_pair(3) if is_self else curses.color_pair(2)
+                        )
+
+                        # Draw body
+                        for i, (x, y) in enumerate(player["body"]):
+                            if i == 0:  # Head
+                                # Use first letter of player's name as head
+                                stdscr.addch(y, x, player["name"][0].upper(), color)
+                            else:  # Body
+                                stdscr.addch(y, x, "o", color)
+
+                # Draw scoreboard
+                y_pos = 1
+                stdscr.addstr(y_pos, width + 2, "SCOREBOARD", curses.color_pair(5))
+                y_pos += 2
+
+                # Sort players by score
+                sorted_players = sorted(
+                    game_state["players"], key=lambda p: p["score"], reverse=True
+                )
+
+                for player in sorted_players:
+                    status = "ALIVE" if player["alive"] else "DEAD"
+                    name_display = player["name"]
+                    if player["name"] == self.player_name:
+                        name_display = f"{name_display} (YOU)"
+
+                    stdscr.addstr(
+                        y_pos,
+                        width + 2,
+                        f"{name_display}: {player['score']} - {status}",
+                        curses.color_pair(5),
                     )
-            except KeyboardInterrupt:
-                print("Game interrupted.")
+                    y_pos += 1
+
+                # Draw instructions
+                y_pos += 2
+                stdscr.addstr(y_pos, width + 2, "Controls:", curses.color_pair(5))
+                y_pos += 1
+                stdscr.addstr(y_pos, width + 2, "W/↑: Up", curses.color_pair(5))
+                y_pos += 1
+                stdscr.addstr(y_pos, width + 2, "S/↓: Down", curses.color_pair(5))
+                y_pos += 1
+                stdscr.addstr(y_pos, width + 2, "A/←: Left", curses.color_pair(5))
+                y_pos += 1
+                stdscr.addstr(y_pos, width + 2, "D/→: Right", curses.color_pair(5))
+                y_pos += 1
+                stdscr.addstr(y_pos, width + 2, "Q: Quit", curses.color_pair(5))
+
+                stdscr.refresh()
+
+                time.sleep(0.05)
+
+            except Exception as e:
                 self.running = False
                 break
-            except Exception as e:
-                print(f"Error: {e}")
 
     def close(self):
         self.client.close()
@@ -282,11 +216,9 @@ def main():
     # Send player name
     client.send_name(name)
 
-    # Start the game
+    # Start the game with curses
     try:
-        client.run_game()
-    except KeyboardInterrupt:
-        pass
+        wrapper(client.run_game)
     finally:
         client.close()
 
